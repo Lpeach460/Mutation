@@ -1,0 +1,134 @@
+library(dplyr)
+#load data
+train_data <- read.csv(file = 'genie_data_mutations_extended.txt',sep = '\t',header = TRUE)
+test_data  <- read.csv(file = 'pre_tcga_mutations_data.txt',sep = '\t',header = TRUE)
+train_data_missensen <- train_data[which(train_data$Variant_Classification == 'Missense_Mutation' & train_data$Variant_Type == 'SNP'),]
+prob <- read.csv(file = 'prob.csv',header = TRUE)
+#tumor sample
+N <- train_data %>%
+  group_by(Tumor_Sample_Barcode) %>%
+  summarise(n())
+n=nrow(N)
+
+#index
+match <- train_data_missensen %>%
+  select(Hugo_Symbol,HGVSp_Short)
+for (i in seq(1,nrow(match))) {
+  len <- nchar(as.character(match$HGVSp_Short[i]))
+  temp <- as.character(match$HGVSp_Short[i])
+  match$index[i] <- paste(as.character(match$Hugo_Symbol[i]),substring(temp,3,len-1),sep = '_')
+} 
+
+#observed data
+count$prob <-0
+count <- match %>%
+  group_by(index) %>%
+  summarise(num_of_mutation=n()) 
+prob$Gene <- as.character(prob$Gene)
+names(prob) <- c("num","index","prob")
+result <- left_join(count,prob,by="index") %>%
+  select(1,2,4)
+
+hist(prob$prob,main="Histogram of estimated probability",xlab = "Estimated probability",ylab = "#")
+
+#======binomial test=======#
+result_binomial_test <- na.omit(result)
+m=nrow(result_binomial_test)
+for (i in seq(1,nrow(result_binomial_test))) {
+  result_binomial_test$p.value[i] <- 
+    binom.test(result_binomial_test$num_of_mutation[i],n,p=result_binomial_test$prob[i],alternative = "greater")$p.value
+}
+
+#q-value
+result_binomial_test<-result_binomial_test[order(result_binomial_test$p.value),]
+result_binomial_test$q.value<-p.adjust(result_binomial_test$p.value,method = "BY",m)
+#identify
+for (i in seq(1,nrow(result_binomial_test))) {
+  result_binomial_test$if_driver[i] <- (result_binomial_test$q.value[i]<=0.01)
+}
+
+#hotspots analysis
+
+sec1 <- result_binomial_test[which(result_binomial_test$if_driver == TRUE),]
+for(i in seq(0,nrow(sec1))){
+  sec1$gene[i] <- unlist(strsplit(sec1$index[i],"_"))[1]
+  sec1$codon[i] <- unlist(strsplit(sec1$index[i],"_"))[2]
+}
+sec1_result <- sec1 %>%
+  group_by(gene) %>%
+  summarise(n())
+
+#cancer analysis
+sample_Duke <- train_data_missensen[grep("DUKE", train_data_missensen$Tumor_Sample_Barcode),] %>%
+  select("Hugo_Symbol","HGVSp_Short","Tumor_Sample_Barcode")
+sample_Duke$Tumor_Sample_Barcode <-as.character(sample_Duke$Tumor_Sample_Barcode)
+
+for(i in seq(0,nrow(sample_Duke))){
+  sample_Duke$organ[i] <- unlist(strsplit(sample_Duke$Tumor_Sample_Barcode[i],"-"))[4]
+}
+
+Duke <- sample_Duke %>%
+  group_by(organ) %>%
+  summarise(n())
+
+
+for (i in seq(1,nrow(sample_Duke))) {
+  len <- nchar(as.character(sample_Duke$HGVSp_Short[i]))
+  temp <- as.character(sample_Duke$HGVSp_Short[i])
+  sample_Duke$index[i] <- paste(as.character(sample_Duke$Hugo_Symbol[i]),substring(temp,3,len-1),sep = '_')
+}
+
+cancer_analysis <- left_join(sample_Duke,result_binomial_test,by="index") %>%
+  select(4,5,9,10)
+
+#validation
+test_data_missensen <- test_data[which(test_data$Variant_Classification == 'Missense_Mutation' & test_data$Variant_Type == 'SNP'),]
+N <- test_data %>%
+  group_by(Tumor_Sample_Barcode) %>%
+  summarise(n())
+observed_table <- test_data_missensen %>%
+  select(Hugo_Symbol,HGVSp_Short)
+for (i in seq(1,nrow(observed_table))) {
+  temp <- as.character(observed_table$HGVSp_Short[i])
+  len <- nchar(temp)
+  observed_table$index[i] <- paste(as.character(observed_table$Hugo_Symbol[i]),substring(temp,3,len-1),sep = '_')
+} 
+
+count_observed <- observed_table %>%
+  group_by(index) %>%
+  summarise(num_of_mutation=n()) 
+
+val_result <- left_join(count_observed,prob,by="index") %>%
+  select(1,2,4)
+
+n=nrow(N)
+val_result_binomial_test <- na.omit(val_result)
+m=nrow(val_result_binomial_test)
+for (i in seq(1,nrow(val_result_binomial_test))) {
+  val_result_binomial_test$p.value[i] <- 
+    binom.test(val_result_binomial_test$num_of_mutation[i],n,p=val_result_binomial_test$prob[i],alternative = "greater")$p.value
+}
+
+val_result_binomial_test<-val_result_binomial_test[order(val_result_binomial_test$p.value),]
+val_result_binomial_test$q.value<- p.adjust(val_result_binomial_test$p.value,method = "BY",m)
+for (i in seq(1,nrow(val_result_binomial_test))) {
+  val_result_binomial_test$if_driver[i] <- (val_result_binomial_test$q.value[i]<=0.01)
+}
+
+#data analysis
+val_hotspots <- val_result_binomial_test[which(val_result_binomial_test$if_driver == TRUE),]
+for(i in seq(0,nrow(val_hotspots))){
+  val_hotspots$gene[i] <- unlist(strsplit(val_hotspots$index[i],"_"))[1]
+}
+
+val_hotspots_gene <- val_hotspots %>%
+  group_by(gene) %>%
+  summarise(n())
+
+#compare
+train_result <- result_binomial_test %>%
+  select(1,6)
+compare <- left_join(val_result_binomial_test,train_result,by="index")
+
+use_train <- compare[which(compare$if_driver.y == TRUE),]
+sum(compare$if_driver.x==compare$if_driver.y)
